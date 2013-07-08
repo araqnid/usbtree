@@ -1,0 +1,323 @@
+#!/usr/bin/perl -w
+
+require 5;
+use strict;
+use warnings;
+use utf8;
+use Getopt::Std;
+use vars qw($opt_s $opt_n);
+
+my %show = ( buses => 0, devices => 1, interfaces => 0, inputs => 1, storage => 1, serial => 1 );
+
+getopts('ns:') && @ARGV == 0 or die "Syntax: $0 [-n] [-s ".join(",", map { "[+-]$_" } sort keys %show)."]\n";
+
+if ($opt_s) {
+  for my $show_spec (split(/,/, $opt_s)) {
+    my $value = 1;
+    if ($show_spec =~ s/^-//) {
+      $value = 0;
+    }
+    $show_spec =~ s/^\+//;
+    if ($show_spec eq 'all') {
+      for (keys %show) {
+	$show{$_} = $value;
+      }
+    }
+    else {
+      die "Unrecognised thing to show: $show_spec\n" if (!exists $show{$show_spec});
+      $show{$show_spec} = $value;
+    }
+  }
+}
+
+my $busdir = "/sys/bus/usb/devices";
+my $usbidsfile = "/usr/share/misc/usb.ids";
+
+my %data;
+
+sub load_vendors {
+  open my $io, "<", $usbidsfile or die "Unable to read $usbidsfile: $1\n";
+  my @stack;
+  while (<$io>) {
+    my $class;
+    if (/^([A-Z]+)\s([0-9a-f]+)\s+(.+)/) {
+      $class = $data{$1} ||= {};
+      my $datum = $class->{$2} = { name => $3 };
+      @stack = ($datum);
+    }
+    elsif (/^([0-9a-f]+)\s+(.+)/) {
+      $class = $data{'_VENDORS'} ||= {};
+      my $datum = $class->{$1} = { name => $2 };
+      @stack = ($datum);
+    }
+    elsif (/^(\t+)([0-9a-fA-F]+)\s+(.+)/) {
+      my $indent_level = length($1);
+      my $parent = $stack[$indent_level-1];
+      my $datum = $parent->{subdata}->{$2} = { name => $3 };
+      $stack[$indent_level] = $datum;
+    }
+    elsif (/^\#/ || !/\S/) {
+      next;
+    }
+    else {
+      warn "Incomprehensible: $_";
+    }
+  }
+}
+
+sub list_buses {
+  opendir my $dir, $busdir or die "Unable to open directory $busdir: $!\n";
+  return sort grep { /^usb/ } readdir $dir;
+}
+
+sub list_devices {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path" or die "Unable to open directory $busdir/$path: $!\n";
+  return sort grep { /^[0-9]+-[0-9.]+$/ } readdir $dir;
+}
+
+sub list_interfaces {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path" or die "Unable to open directory $busdir/$path: $!\n";
+  return sort grep { /^[0-9]+-[0-9.]+:[0-9.]+$/ } readdir $dir;
+}
+
+sub list_inputs {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path/input" or die "Unable to open directory $busdir/$path/input: $!\n";
+  return sort grep { /^input/ } readdir $dir;
+}
+
+sub list_scsi_hosts {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path" or die "Unable to open directory $busdir/$path: $!\n";
+  return sort grep { /^host/ } readdir $dir;
+}
+
+sub list_scsi_targets {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path" or die "Unable to open directory $busdir/$path: $!\n";
+  return sort grep { /^target/ } readdir $dir;
+}
+
+sub list_scsi_units {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path" or die "Unable to open directory $busdir/$path: $!\n";
+  return sort grep { /^\d+:\d+:\d+:\d+$/ } readdir $dir;
+}
+
+sub list_scsi_blockdevs {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path/block" or die "Unable to open directory $busdir/$path/block: $!\n";
+  return sort grep { !/^\./ } readdir $dir;
+}
+
+sub list_serial_interfaces {
+  my $path = shift;
+  opendir my $dir, "$busdir/$path" or die "Unable to open directory $busdir/$path: $!\n";
+  return sort grep { /^ttyUSB/ } readdir $dir;
+}
+
+sub node {
+  my($dir, $file) = @_;
+  my $value;
+  {
+    my $io;
+    if (! open $io, "<", "$busdir/$dir/$file") {
+      return undef if ($!{ENOENT});
+      die "Unable to read $dir/$file: $!\n";
+    }
+    local $/;
+    undef $/;
+    $value = <$io>;
+  }
+  chomp $value;
+  return $value;
+}
+
+sub leafname {
+  my $str = shift;
+  $str && $str =~ s|.*/||;
+  return $str;
+}
+
+sub linkednode_leafname {
+  my($dir, $file) = @_;
+  return leafname(readlink("$busdir/$dir/$file"));
+}
+
+sub full_product_name {
+  my $vendor_id = shift;
+  my $product_id = shift;
+  $opt_n and return "Vendor#$vendor_id Product#$product_id";
+  my $vendor = $data{_VENDORS}->{$vendor_id} or return "Vendor#$vendor_id Product#$product_id";
+  my $product = $vendor->{subdata}->{$product_id} or return "$vendor->{name} Product#$product_id";
+  return "$vendor->{name} $product->{name}";
+}
+
+sub full_device_class_name {
+  my $class_id = shift;
+  my $subclass_id = shift;
+  my $protocol_id = shift;
+  $opt_n and return "Class#$class_id Subclass#$subclass_id Protocol#$protocol_id";
+  my $class = $data{C}->{$class_id} or return "Class#$class_id Subclass#$subclass_id Protocol#$protocol_id";
+  my $subclass = $class->{subdata}->{$subclass_id} or return "$class->{name} Subclass#$subclass_id Protocol#$protocol_id";
+  my $protocol = $subclass->{subdata}->{$protocol_id} or return "$class->{name} $subclass->{name} Protocol#$protocol_id";
+  return "$class->{name} $subclass->{name} $protocol->{name}";
+}
+
+sub full_scsi_dev_name {
+  my $type_id = shift;
+  my $vendor = shift;
+  my $model = shift;
+  my $rev = shift;
+  my $removable = shift;
+
+  my %types = (0 => 'disk', 5 => 'cd/dvd');
+  my $type_name = !$opt_n && $types{hex($type_id)};
+  $type_name ||= "Type#$type_id";
+  $type_name = "removable $type_name" if ($removable);
+
+  return "$type_name $vendor $model $rev";
+}
+
+load_vendors;
+
+sub show_subdevices {
+  my $level = shift;
+  my $path = shift;
+
+  for my $device_spec (list_devices($path)) {
+    show_device($level, $path, $device_spec);
+  }
+}
+
+sub show_device {
+  my $level = shift;
+  my $path = shift;
+  my $device_spec = shift;
+
+  my $device = "$path/$device_spec";
+
+  my $prefix = " " x ($level*2);
+
+  my $idVendor = node($device, "idVendor");
+  my $idProduct = node($device, "idProduct");
+  my $bDeviceClass = node($device, "bDeviceClass");
+  my $bDeviceSubClass = node($device, "bDeviceSubClass");
+  my $bDeviceProtocol = node($device, "bDeviceProtocol");
+  my $busnum = node($device, "busnum");
+  my $devnum = node($device, "devnum");
+  my $speed = node($device, "speed");
+  my $device_info = full_product_name($idVendor, $idProduct);
+  if ($bDeviceClass ne '00') {
+    $device_info .= " [".full_device_class_name($bDeviceClass, $bDeviceSubClass, $bDeviceProtocol)."]";
+  }
+
+  $device_info .= " [${speed}M]";
+
+  if ($show{devices}) {
+    print "$prefix$device_spec ($busnum:$devnum): $device_info\n";
+    ++$level;
+  }
+
+  show_interfaces($level, $device);
+  show_subdevices($level, $device);
+}
+
+sub show_interfaces {
+  my $level = shift;
+  my $device = shift;
+
+  my $prefix = " " x ($level*2);
+  $show{interfaces} && ++$level;
+
+  for my $interface_spec (list_interfaces($device)) {
+    my $interface = "$device/$interface_spec";
+    my $bInterfaceClass = node($interface, "bInterfaceClass");
+    my $bInterfaceSubClass = node($interface, "bInterfaceSubClass");
+    my $bInterfaceProtocol = node($interface, "bInterfaceProtocol");
+    my $driver = linkednode_leafname($interface, "driver");
+    if ($show{interfaces}) {
+      my $interface_info = full_device_class_name($bInterfaceClass, $bInterfaceSubClass, $bInterfaceProtocol);
+      $interface_info = "[driver=$driver] $interface_info" if ($driver);
+      print "$prefix$interface_spec: $interface_info\n";
+    }
+    if (-d "$busdir/$interface/input") {
+      show_inputs($level, $interface);
+    }
+    if ($bInterfaceClass eq '08' && $bInterfaceSubClass eq '06') {
+      show_scsi_storage($level, $interface);
+    }
+    show_serial_interfaces($level, $interface);
+  }
+}
+
+sub show_inputs {
+  my $level = shift;
+  my $interface = shift;
+
+  my $prefix = " " x ($level*2);
+
+  for my $input_spec (list_inputs($interface)) {
+    my $input = "$interface/input/$input_spec";
+    my $name = node($input, "name");
+    if ($show{inputs}) {
+      print "$prefix$input_spec: $name\n";
+    }
+  }
+}
+
+sub show_scsi_storage {
+  my $level = shift;
+  my $interface = shift;
+
+  my $prefix = " " x ($level*2);
+
+  for my $host_spec (list_scsi_hosts($interface)) {
+    my $host = "$interface/$host_spec";
+    for my $target_spec (list_scsi_targets($host)) {
+      my $target = "$host/$target_spec";
+      for my $unit_spec (list_scsi_units($target)) {
+	my $unit = "$target/$unit_spec";
+	my $type = node($unit, "type");
+	my $vendor = node($unit, "vendor");
+	my $model = node($unit, "model");
+	my $rev = node($unit, "rev");
+	for my $block_dev_spec (list_scsi_blockdevs($unit)) {
+	  my $block_dev = "$unit/block/$block_dev_spec";
+	  my $removable = node($block_dev, "removable");
+	  if ($show{storage}) {
+	    print "${prefix}scsi $unit_spec [$block_dev_spec]: ".full_scsi_dev_name($type, $vendor, $model, $rev, $removable)."\n";
+	  }
+	}
+      }
+    }
+  }
+}
+
+sub show_serial_interfaces {
+  my $level = shift;
+  my $interface = shift;
+
+  my $prefix = " " x ($level*2);
+
+  for my $serial_interface_spec (list_serial_interfaces($interface)) {
+    my $serial_interface = "$interface/$serial_interface_spec";
+    if ($show{serial}) {
+      print "$prefix$serial_interface_spec\n";
+    }
+  }
+}
+
+for my $bus (list_buses) {
+  my $idVendor = node($bus, "idVendor");
+  my $idProduct = node($bus, "idProduct");
+  my $busnum = node($bus, "busnum");
+  my $devnum = node($bus, "devnum");
+  my $speed = node($bus, "speed");
+  if ($show{buses}) {
+    print "$bus ($busnum:$devnum): ".full_product_name($idVendor, $idProduct)." [${speed}M]\n";
+  }
+  show_subdevices(0 + ($show{buses} ? 1 : 0), $bus);
+}
