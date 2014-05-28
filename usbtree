@@ -35,6 +35,23 @@ my $usbidsfile = "/usr/share/misc/usb.ids";
 
 my %data;
 
+sub emit {
+  my $type = shift;
+  my $output = shift;
+  my $continue = shift || sub { };
+  our $level ||= 0;
+  if ($show{$type}) {
+    my $prefix = " " x ($level * 2);
+    print "$prefix$output\n";
+    $level++;
+    &$continue;
+    $level--;
+  }
+  else {
+    &$continue;
+  }
+}
+
 sub load_vendors {
   open my $io, "<", $usbidsfile or die "Unable to read $usbidsfile: $1\n";
   my @stack;
@@ -184,22 +201,18 @@ sub full_scsi_dev_name {
 load_vendors;
 
 sub show_subdevices {
-  my $level = shift;
   my $path = shift;
 
   for my $device_spec (list_devices($path)) {
-    show_device($level, $path, $device_spec);
+    show_device($path, $device_spec);
   }
 }
 
 sub show_device {
-  my $level = shift;
   my $path = shift;
   my $device_spec = shift;
 
   my $device = "$path/$device_spec";
-
-  my $prefix = " " x ($level*2);
 
   my $idVendor = node($device, "idVendor");
   my $idProduct = node($device, "idProduct");
@@ -216,21 +229,14 @@ sub show_device {
 
   $device_info .= " [${speed}M]";
 
-  if ($show{devices}) {
-    print "$prefix$device_spec ($busnum:$devnum): $device_info\n";
-    ++$level;
-  }
-
-  show_interfaces($level, $device);
-  show_subdevices($level, $device);
+  emit('devices', "$device_spec ($busnum:$devnum): $device_info", sub {
+    show_interfaces($device);
+    show_subdevices($device);
+  });
 }
 
 sub show_interfaces {
-  my $level = shift;
   my $device = shift;
-
-  my $prefix = " " x ($level*2);
-  $show{interfaces} && ++$level;
 
   for my $interface_spec (list_interfaces($device)) {
     my $interface = "$device/$interface_spec";
@@ -238,41 +244,32 @@ sub show_interfaces {
     my $bInterfaceSubClass = node($interface, "bInterfaceSubClass");
     my $bInterfaceProtocol = node($interface, "bInterfaceProtocol");
     my $driver = linkednode_leafname($interface, "driver");
-    if ($show{interfaces}) {
-      my $interface_info = full_device_class_name($bInterfaceClass, $bInterfaceSubClass, $bInterfaceProtocol);
-      $interface_info = "[driver=$driver] $interface_info" if ($driver);
-      print "$prefix$interface_spec: $interface_info\n";
-    }
-    if (-d "$busdir/$interface/input") {
-      show_inputs($level, $interface);
-    }
-    if ($bInterfaceClass eq '08' && $bInterfaceSubClass eq '06') {
-      show_scsi_storage($level, $interface);
-    }
-    show_serial_interfaces($level, $interface);
+    my $interface_info = full_device_class_name($bInterfaceClass, $bInterfaceSubClass, $bInterfaceProtocol);
+    $interface_info = "[driver=$driver] $interface_info" if ($driver);
+    emit('interfaces', "$interface_spec: $interface_info", sub {
+      if (-d "$busdir/$interface/input") {
+	show_inputs($interface);
+      }
+      if ($bInterfaceClass eq '08' && $bInterfaceSubClass eq '06') {
+	show_scsi_storage($interface);
+      }
+      show_serial_interfaces($interface);
+    });
   }
 }
 
 sub show_inputs {
-  my $level = shift;
   my $interface = shift;
-
-  my $prefix = " " x ($level*2);
 
   for my $input_spec (list_inputs($interface)) {
     my $input = "$interface/input/$input_spec";
     my $name = node($input, "name");
-    if ($show{inputs}) {
-      print "$prefix$input_spec: $name\n";
-    }
+    emit('inputs', "$input_spec: $name");
   }
 }
 
 sub show_scsi_storage {
-  my $level = shift;
   my $interface = shift;
-
-  my $prefix = " " x ($level*2);
 
   for my $host_spec (list_scsi_hosts($interface)) {
     my $host = "$interface/$host_spec";
@@ -287,9 +284,7 @@ sub show_scsi_storage {
 	for my $block_dev_spec (list_scsi_blockdevs($unit)) {
 	  my $block_dev = "$unit/block/$block_dev_spec";
 	  my $removable = node($block_dev, "removable");
-	  if ($show{storage}) {
-	    print "${prefix}scsi $unit_spec [$block_dev_spec]: ".full_scsi_dev_name($type, $vendor, $model, $rev, $removable)."\n";
-	  }
+	  emit('storage', "scsi $unit_spec [$block_dev_spec]: ".full_scsi_dev_name($type, $vendor, $model, $rev, $removable));
 	}
       }
     }
@@ -297,16 +292,11 @@ sub show_scsi_storage {
 }
 
 sub show_serial_interfaces {
-  my $level = shift;
   my $interface = shift;
-
-  my $prefix = " " x ($level*2);
 
   for my $serial_interface_spec (list_serial_interfaces($interface)) {
     my $serial_interface = "$interface/$serial_interface_spec";
-    if ($show{serial}) {
-      print "$prefix$serial_interface_spec\n";
-    }
+    emit('serial', $serial_interface_spec);
   }
 }
 
@@ -316,8 +306,7 @@ for my $bus (list_buses) {
   my $busnum = node($bus, "busnum");
   my $devnum = node($bus, "devnum");
   my $speed = node($bus, "speed");
-  if ($show{buses}) {
-    print "$bus ($busnum:$devnum): ".full_product_name($idVendor, $idProduct)." [${speed}M]\n";
-  }
-  show_subdevices(0 + ($show{buses} ? 1 : 0), $bus);
+  emit("buses", "$bus ($busnum:$devnum): ".full_product_name($idVendor, $idProduct)." [${speed}M]", sub {
+    show_subdevices($bus);
+  });
 }
