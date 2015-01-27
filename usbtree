@@ -125,6 +125,7 @@ sub list_scsi_units {
 
 sub list_scsi_blockdevs {
   my $path = shift;
+  -d "$busdir/$path/block" or return ();
   opendir my $dir, "$busdir/$path/block" or die "Unable to open directory $busdir/$path/block: $!\n";
   return sort grep { !/^\./ } readdir $dir;
 }
